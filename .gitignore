@@ -1,3 +1,7 @@
+# Dev
+/data
+/build
+
 # Prerequisites
 *.d
 
