@@ -6,10 +6,8 @@ inline int fast_atoi(std::string_view sv) noexcept {
   const char* p = sv.data();
   const char* end = p + sv.size();
   
-  int sign = 1;
   if (p != end && *p == '-') {
-    sign = -1;
-    ++p;
+    return -1;
   }
 
   int value = 0;
@@ -17,7 +15,7 @@ inline int fast_atoi(std::string_view sv) noexcept {
     value = value * 10 + (*p - '0');
     ++p;
   }
-  return sign * value;
+  return value;
 }
 
 bool parse_line(std::string_view line, DataRecord& rec) {

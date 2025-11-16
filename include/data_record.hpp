@@ -1,7 +1,7 @@
 #pragma once
 
 struct DataRecord {
-  int provider_peer;
-  int customer_peer;
+  uint32_t provider_peer;
+  uint32_t customer_peer;
   int indicator;
 };
