@@ -403,3 +403,77 @@ TEST(BGPPolicyTest, LowerNextHopBreaksTie) {
 
     EXPECT_EQ(it->second.next_hop_asn, 50u);
 }
+
+
+// -------------------- FLATTEN / RANK TESTS --------------------
+
+TEST(FlattenTest, SimpleChainRanks) {
+    // 1 -> 2 -> 3 -> 4 (provider -> customer)
+    ASGraph g(4);
+    g.add_provider_customer(1, 2);
+    g.add_provider_customer(2, 3);
+    g.add_provider_customer(3, 4);
+
+    auto layers = flatten_graph(g);
+
+    ASSERT_EQ(layers.size(), 4u);
+
+    // rank 0: leaf (no customers)
+    ASSERT_EQ(layers[0].size(), 1u);
+    EXPECT_EQ(layers[0][0], 4u);
+
+    // rank 1: provider of 4
+    ASSERT_EQ(layers[1].size(), 1u);
+    EXPECT_EQ(layers[1][0], 3u);
+
+    // rank 2: provider of 3
+    ASSERT_EQ(layers[2].size(), 1u);
+    EXPECT_EQ(layers[2][0], 2u);
+
+    // rank 3: provider of 2
+    ASSERT_EQ(layers[3].size(), 1u);
+    EXPECT_EQ(layers[3][0], 1u);
+}
+
+TEST(FlattenTest, BranchingGraphRanks) {
+    // 1 is provider of 2 and 3; 2 and 3 are providers of 4:
+    //
+    //   1
+    //  / \
+    // 2   3
+    //  \ /
+    //   4
+    ASGraph g(4);
+    g.add_provider_customer(1, 2);
+    g.add_provider_customer(1, 3);
+    g.add_provider_customer(2, 4);
+    g.add_provider_customer(3, 4);
+
+    auto layers = flatten_graph(g);
+
+    ASSERT_EQ(layers.size(), 3u);
+
+    // rank 0: leaf
+    ASSERT_EQ(layers[0].size(), 1u);
+    EXPECT_EQ(layers[0][0], 4u);
+
+    // rank 1: 2 and 3 (order not guaranteed)
+    ASSERT_EQ(layers[1].size(), 2u);
+    std::vector<uint32_t> r1 = layers[1];
+    std::sort(r1.begin(), r1.end());
+    EXPECT_EQ(r1[0], 2u);
+    EXPECT_EQ(r1[1], 3u);
+
+    // rank 2: 1
+    ASSERT_EQ(layers[2].size(), 1u);
+    EXPECT_EQ(layers[2][0], 1u);
+}
+
+TEST(FlattenTest, ThrowsOnCycle) {
+    ASGraph g(3);
+    g.add_provider_customer(1, 2);
+    g.add_provider_customer(2, 3);
+    g.add_provider_customer(3, 1);   // cycle
+
+    EXPECT_THROW(flatten_graph(g), std::runtime_error);
+}

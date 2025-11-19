@@ -106,3 +106,79 @@ inline void assert_provider_acyclic(const ASGraph& graph)
     throw std::runtime_error("Provider/customer cycle detected in AS graph");
   }
 }
+
+inline std::vector<int> compute_propagation_ranks(const ASGraph& graph)
+{
+  const std::size_t n = graph.size();
+  std::vector<int> rank(n, -1);
+
+  std::vector<uint32_t> remaining_children(n, 0);
+  for (uint32_t asn = 1; asn < n; ++asn)
+  {
+    remaining_children[asn] =
+      static_cast<uint32_t>(graph.get(asn).customers.size());
+  }
+
+  std::queue<uint32_t> q;
+  for (uint32_t asn = 1; asn < n; ++asn)
+  {
+    if (remaining_children[asn] == 0)
+    {
+      rank[asn] = 0;
+      q.push(asn);
+    }
+  }
+
+  while (!q.empty())
+  {
+    uint32_t u = q.front();
+    q.pop();
+    const int r_u = rank[u];
+
+    for (uint32_t provider : graph.get(u).providers)
+    {
+      if (rank[provider] < r_u + 1)
+        rank[provider] = r_u + 1;
+      if (remaining_children[provider] > 0)
+      {
+        --remaining_children[provider];
+        if (remaining_children[provider] == 0)
+          q.push(provider);
+      }
+    }
+  }
+
+  for (uint32_t asn = 1; asn < n; ++asn)
+  {
+    if (remaining_children[asn] != 0)
+      throw std::runtime_error("compute_propogation_ranks: provider/customer cycle detected");
+  }
+
+  return rank;
+}
+
+inline std::vector<std::vector<uint32_t>> flatten_graph(const ASGraph& graph)
+{
+  std::vector<int> rank = compute_propagation_ranks(graph);
+
+  int max_rank = -1;
+  const std::size_t n = rank.size();
+  for (uint32_t asn = 1; asn < n; ++asn)
+  {
+    if (rank[asn] >= 0 && rank[asn] > max_rank)
+      max_rank = rank[asn];
+  }
+
+  if (max_rank < 0) return {};
+
+  std::vector<std::vector<uint32_t>> layers(static_cast<std::size_t>(max_rank) + 1);
+
+  for (uint32_t asn = 1; asn < n; ++asn)
+  {
+    int r = rank[asn];
+    if (r >= 0)
+      layers[static_cast<std::size_t>(r)].push_back(asn);
+  }
+
+  return layers;
+}
