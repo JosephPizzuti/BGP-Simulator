@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <stdexcept>
+#include <algorithm>
 #include "data_record.hpp"
 #include "read_caida.hpp"
 
@@ -42,10 +43,10 @@ public:
 
 inline void build_graph(const std::string& filename, ASGraph& graph) {
   read_caida_data(filename, [&](const DataRecord& rec) {
-    if (rec.indicator == 0) {
+    if (rec.indicator == -1) {
       graph.add_provider_customer(rec.provider_peer, rec.customer_peer);
     }
-    else if (rec.indicator == -1) {
+    else if (rec.indicator == 0) {
       graph.add_peer(rec.provider_peer, rec.customer_peer);
     }
     else {
@@ -62,29 +63,46 @@ enum VisitState : uint8_t {
 
 namespace detail {
 
-inline bool dfs_cycle(uint32_t u,
-                      std::vector<VisitState>& state,
-                      const ASGraph& graph) {
-  if (state[u] == VisitState::ACTIVE)   return true;
-  if (state[u] == VisitState::FINISHED) return false;
+inline bool dfs_has_cycle(uint32_t u,
+                          const ASGraph& graph,
+                          std::vector<VisitState>& state)
+{
+  state[u] = ACTIVE;
 
-  state[u] = VisitState::ACTIVE;
-
-  for (uint32_t parent : graph.get(u).providers)
-    if (dfs_cycle(parent, state, graph))
+  for (uint32_t customer : graph.get(u).customers) {
+    if (state[customer] == ACTIVE) {
       return true;
+    }
+    if (state[customer] == UNVISITED) {
+      if (dfs_has_cycle(customer, graph, state)) {
+        return true;
+      }
+    }
+  }
 
-  state[u] = VisitState::FINISHED;
+  state[u] = FINISHED;
   return false;
 }
 
 } // end of namespace detail
 
-inline bool has_provider_cycle(const ASGraph& graph) {
+inline bool has_provider_cycle(const ASGraph& graph)
+{
   std::vector<VisitState> state(graph.size(), UNVISITED);
 
-  for (uint32_t i = 1; i < graph.size(); ++i)
-    if (detail::dfs_cycle(i, state, graph))
-      return true;
+  for (uint32_t asn = 1; asn < graph.size(); ++asn) {
+    if (state[asn] == UNVISITED) {
+      if (detail::dfs_has_cycle(asn, graph, state)) {
+        return true;
+      }
+    }
+  }
   return false;
+}
+
+inline void assert_provider_acyclic(const ASGraph& graph)
+{
+  if (has_provider_cycle(graph)) {
+    throw std::runtime_error("Provider/customer cycle detected in AS graph");
+  }
 }
