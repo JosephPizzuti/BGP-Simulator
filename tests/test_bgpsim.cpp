@@ -6,6 +6,8 @@
 #include "../include/announcement.hpp"
 #include "../include/policy.hpp"
 #include "../include/bgp.hpp"
+#include "../include/bgp_sim.hpp"
+#include "../include/output.hpp"
 
 #include <fstream>
 #include <vector>
@@ -13,6 +15,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 
 // -------------------- PARSER TESTS --------------------
 
@@ -476,4 +479,186 @@ TEST(FlattenTest, ThrowsOnCycle) {
     g.add_provider_customer(3, 1);   // cycle
 
     EXPECT_THROW(flatten_graph(g), std::runtime_error);
+}
+
+
+// -------------------- BGPSim / Seeding TESTS --------------------
+
+TEST(BGPSimTest, SeedStoresOriginAnnouncement) {
+    // Simple graph with 5 ASes, no edges needed for seeding
+    ASGraph g(5);
+    BGPSim sim(g);
+
+    const std::string prefix = "1.2.3.0/24";
+    uint32_t origin_asn = 3;
+
+    sim.seed_prefix(prefix, origin_asn);
+
+    const auto& rib3 = sim.policy(origin_asn).local_rib();
+    auto it = rib3.find(prefix);
+    ASSERT_NE(it, rib3.end());
+
+    const Announcement& ann = it->second;
+    EXPECT_EQ(ann.prefix, prefix);
+    ASSERT_EQ(ann.as_path.size(), 1u);
+    EXPECT_EQ(ann.as_path[0], origin_asn);
+    EXPECT_EQ(ann.next_hop_asn, origin_asn);
+    EXPECT_EQ(ann.received_from, Relationship::ORIGIN);
+}
+
+
+// -------------------- BGPSim Propagation TESTS --------------------
+
+TEST(BGPSimPropagationTest, PropagateUpSimpleChain) {
+    // 1 -> 2 -> 3 (provider -> customer)
+    // 1 is top, 3 is leaf
+    ASGraph g(3);
+    g.add_provider_customer(1, 2);
+    g.add_provider_customer(2, 3);
+
+    BGPSim sim(g);
+
+    // Seed at AS 3
+    sim.seed_prefix("10.0.0.0/24", 3);
+
+    // Before propagation, only 3 should know the route
+    auto rib1_before = sim.policy(1).local_rib();
+    auto rib2_before = sim.policy(2).local_rib();
+    auto rib3_before = sim.policy(3).local_rib();
+    EXPECT_TRUE(rib1_before.empty());
+    EXPECT_TRUE(rib2_before.empty());
+    EXPECT_FALSE(rib3_before.empty());
+
+    sim.propagate_up();
+
+    const auto& rib1 = sim.policy(1).local_rib();
+    const auto& rib2 = sim.policy(2).local_rib();
+    const auto& rib3 = sim.policy(3).local_rib();
+
+    // AS 3 (origin)
+    {
+        auto it = rib3.find("10.0.0.0/24");
+        ASSERT_NE(it, rib3.end());
+        EXPECT_EQ(it->second.as_path.size(), 1u);
+        EXPECT_EQ(it->second.as_path[0], 3u);
+        EXPECT_EQ(it->second.received_from, Relationship::ORIGIN);
+    }
+
+    // AS 2 (customer of 1, provider of 3): FROM_CUSTOMER
+    {
+        auto it = rib2.find("10.0.0.0/24");
+        ASSERT_NE(it, rib2.end());
+        EXPECT_EQ(it->second.as_path.size(), 2u);
+        EXPECT_EQ(it->second.as_path[0], 2u);
+        EXPECT_EQ(it->second.as_path[1], 3u);
+        EXPECT_EQ(it->second.received_from, Relationship::FROM_CUSTOMER);
+    }
+
+    // AS 1: FROM_CUSTOMER
+    {
+        auto it = rib1.find("10.0.0.0/24");
+        ASSERT_NE(it, rib1.end());
+        EXPECT_EQ(it->second.as_path.size(), 3u);
+        EXPECT_EQ(it->second.as_path[0], 1u);
+        EXPECT_EQ(it->second.as_path[1], 2u);
+        EXPECT_EQ(it->second.as_path[2], 3u);
+        EXPECT_EQ(it->second.received_from, Relationship::FROM_CUSTOMER);
+    }
+}
+
+TEST(BGPSimPropagationTest, PropagateAcrossPeersSingleHop) {
+    // Two peers, no provider/customer edges
+    ASGraph g(2);
+    g.add_peer(1, 2);
+
+    BGPSim sim(g);
+
+    sim.seed_prefix("1.2.3.0/24", 1);
+
+    sim.propagate_across_peers();
+
+    const auto& rib1 = sim.policy(1).local_rib();
+    const auto& rib2 = sim.policy(2).local_rib();
+
+    // AS 1: origin
+    {
+        auto it = rib1.find("1.2.3.0/24");
+        ASSERT_NE(it, rib1.end());
+        EXPECT_EQ(it->second.as_path.size(), 1u);
+        EXPECT_EQ(it->second.as_path[0], 1u);
+        EXPECT_EQ(it->second.received_from, Relationship::ORIGIN);
+    }
+
+    // AS 2: FROM_PEER
+    {
+        auto it = rib2.find("1.2.3.0/24");
+        ASSERT_NE(it, rib2.end());
+        EXPECT_EQ(it->second.as_path.size(), 2u);
+        EXPECT_EQ(it->second.as_path[0], 2u);
+        EXPECT_EQ(it->second.as_path[1], 1u);
+        EXPECT_EQ(it->second.received_from, Relationship::FROM_PEER);
+    }
+}
+
+// -------------------- OUTPUT / CSV TESTS --------------------
+
+TEST(OutputTest, WritesCsvForSimpleGraph) {
+    // Graph:
+    //   1 (provider)
+    //   └─> 2 (customer)
+    ASGraph g(2);
+    g.add_provider_customer(1, 2);
+
+    BGPSim sim(g);
+
+    // Seed at AS 2
+    const std::string prefix = "10.0.0.0/24";
+    sim.seed_prefix(prefix, 2);
+
+    // Propagate full path: up (2 -> 1), across (none), down (1 -> 2, ignored by 2)
+    sim.propagate_all();
+
+    // Write CSV
+    const std::string filename = "routing_test.csv";
+    write_routing_csv(sim, filename);
+
+    // Read back
+    std::ifstream in(filename);
+    ASSERT_TRUE(in.is_open());
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(in, line)) {
+        lines.push_back(line);
+    }
+
+    // Expect header + up to two lines (AS1 and AS2 both know the prefix)
+    ASSERT_EQ(lines.size(), 3u);
+    EXPECT_EQ(lines[0], "asn,prefix,as_path");
+
+    // Parse line for ASN 1
+    {
+        std::stringstream ss(lines[1]);
+        std::string asn_str, prefix_str, path_str;
+        std::getline(ss, asn_str, ',');
+        std::getline(ss, prefix_str, ',');
+        std::getline(ss, path_str, '\n');
+
+        EXPECT_EQ(asn_str, "1");
+        EXPECT_EQ(prefix_str, prefix);
+        EXPECT_EQ(path_str, "1 2");   // 1 sees path [1,2]
+    }
+
+    // Parse line for ASN 2
+    {
+        std::stringstream ss(lines[2]);
+        std::string asn_str, prefix_str, path_str;
+        std::getline(ss, asn_str, ',');
+        std::getline(ss, prefix_str, ',');
+        std::getline(ss, path_str, '\n');
+
+        EXPECT_EQ(asn_str, "2");
+        EXPECT_EQ(prefix_str, prefix);
+        EXPECT_EQ(path_str, "2");     // 2 is origin, path [2]
+    }
 }
