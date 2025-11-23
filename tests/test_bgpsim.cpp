@@ -662,3 +662,56 @@ TEST(OutputTest, WritesCsvForSimpleGraph) {
         EXPECT_EQ(path_str, "2");     // 2 is origin, path [2]
     }
 }
+
+
+TEST(ROVPolicyTest, DropsInvalidAnnouncements) {
+    ROVPolicy pol(10);
+
+    Announcement valid = make_origin_announcement("1.2.3.0/24", 10);
+    Announcement invalid = valid;
+    invalid.rov_invalid = true;
+
+    pol.enqueue(valid);
+    pol.enqueue(invalid);
+    pol.process_pending();
+
+    const auto& rib = pol.local_rib();
+    auto it = rib.find("1.2.3.0/24");
+    ASSERT_NE(it, rib.end());
+}
+
+
+TEST(BGPSimROVTest, ROVNodeDoesNotStoreInvalidRoute) {
+    // Simple 1 <-> 2 peering; 2 is ROV-enabled.
+    ASGraph g(2);
+    g.add_peer(1, 2);
+
+    std::vector<uint32_t> rov_asns = {2};
+    BGPSim sim(g, rov_asns);
+
+    // Inject an invalid route at AS 1 (pretend it hijacked some prefix)
+    Announcement hijack = make_origin_announcement("10.10.0.0/16", 1);
+    hijack.rov_invalid = true;
+
+    sim.policy(1).enqueue(hijack);
+    sim.policy(1).process_pending();
+
+    // Propagate across peers
+    sim.propagate_across_peers();
+
+    const auto& rib1 = sim.policy(1).local_rib();
+    const auto& rib2 = sim.policy(2).local_rib();
+
+    // AS 1 (non-ROV) keeps its own invalid route
+    {
+        auto it = rib1.find("10.10.0.0/16");
+        ASSERT_NE(it, rib1.end());
+        EXPECT_TRUE(it->second.rov_invalid);
+    }
+
+    // AS 2 (ROV) should have dropped it
+    {
+        auto it = rib2.find("10.10.0.0/16");
+        EXPECT_EQ(it, rib2.end());
+    }
+}

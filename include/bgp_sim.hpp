@@ -3,6 +3,8 @@
 #include <string>
 #include <cstdint>
 #include <stdexcept>
+#include <memory>
+#include <unordered_set>
 
 #include "as_graph.hpp"
 #include "bgp.hpp"
@@ -24,28 +26,35 @@ class BGPSim
                        base.as_path.begin(),
                        base.as_path.end());
 
-    out.next_hop_asn = from_asn;
+    out.next_hop_asn  = from_asn;
     out.received_from = rel_at_receiver;
+    out.rov_invalid   = base.rov_invalid;
 
     return out;
   }
 
   const ASGraph& graph_;
-  std::vector<BGPPolicy> policies_;
+  std::vector<std::unique_ptr<Policy>> policies_;
   std::vector<std::vector<uint32_t>> layers_;
 
 public:
-  explicit BGPSim(const ASGraph& graph)
+  explicit BGPSim(const ASGraph& graph,
+                  const std::vector<uint32_t>& rov_asns = {})
     : graph_(graph),
       layers_(flatten_graph(graph))
   {
     const std::size_t n = graph_.size();
-    policies_.reserve(n);
+    policies_.resize(n);
 
-    policies_.emplace_back(0);
+    std::unordered_set<uint32_t> rov(rov_asns.begin(), rov_asns.end());
+
+    policies_[0] = std::make_unique<BGPPolicy>(0);
 
     for (uint32_t asn = 1; asn < n; ++asn)
-      policies_.emplace_back(asn);
+      if (rov.count(asn))
+        policies_[asn] = std::make_unique<ROVPolicy>(asn);
+      else
+        policies_[asn] = std::make_unique<BGPPolicy>(asn);
   }
 
   uint32_t max_asn() const noexcept
@@ -53,14 +62,14 @@ public:
     return static_cast<uint32_t>(policies_.size() - 1);
   }
 
-  BGPPolicy& policy(uint32_t asn)
+  Policy& policy(uint32_t asn)
   {
-    return policies_.at(asn);
+    return *policies_.at(asn);
   }
 
-  const BGPPolicy& policy(uint32_t asn) const
+  const Policy& policy(uint32_t asn) const
   {
-    return policies_.at(asn);
+    return *policies_.at(asn);
   }
 
   const std::vector<std::vector<uint32_t>>& layers() const noexcept
@@ -68,14 +77,17 @@ public:
     return layers_;
   }
 
-  void seed_prefix(const std::string& prefix, uint32_t origin_asn)
+  void seed_prefix(const std::string& prefix,
+                   uint32_t origin_asn,
+                   bool rov_invalid = false)
   {
     if (origin_asn == 0 || origin_asn >= graph_.size())
       throw std::runtime_error("seed_prefix: origin ASN out of range");
 
     Announcement a = make_origin_announcement(prefix, origin_asn);
+    a.rov_invalid = rov_invalid;
 
-    auto& pol = policies_.at(origin_asn);
+    auto& pol = policy(origin_asn);
     pol.enqueue(a);
     pol.process_pending();
   }
@@ -90,7 +102,7 @@ public:
       for (uint32_t asn : layers_[r])
       {
         const ASNode& node = graph_.get(asn);
-        const auto& rib = policies_[asn].local_rib();
+        const auto& rib = policy(asn).local_rib();
         if (rib.empty()) continue;
 
         for (const auto& kv : rib)
@@ -105,19 +117,15 @@ public:
               provider,
               Relationship::FROM_CUSTOMER
             );
-            policies_[provider].enqueue(out);
+            policy(provider).enqueue(out);
           }
         }
       }
 
       if (r + 1 < num_ranks)
-      {
         for (uint32_t asn : layers_[r + 1])
-        {
-          if (policies_[asn].has_pending())
-            policies_[asn].process_pending();
-        }
-      }
+          if (policy(asn).has_pending())
+            policy(asn).process_pending();
     }
   }
 
@@ -128,7 +136,7 @@ public:
     for (uint32_t asn = 1; asn < n; ++asn)
     {
       const ASNode& node = graph_.get(asn);
-      const auto& rib = policies_[asn].local_rib();
+      const auto& rib = policy(asn).local_rib();
       if (rib.empty()) continue;
 
       for (const auto& kv : rib)
@@ -143,16 +151,14 @@ public:
             peer,
             Relationship::FROM_PEER
           );
-          policies_[peer].enqueue(out);
+          policy(peer).enqueue(out);
         }
       }
     }
 
     for (uint32_t asn = 1; asn < n; ++asn)
-    {
-      if (policies_[asn].has_pending())
-        policies_[asn].process_pending();
-    }
+      if (policy(asn).has_pending())
+        policy(asn).process_pending();
   }
 
   void propagate_down()
@@ -165,7 +171,7 @@ public:
       for (uint32_t asn : layers_[r])
       {
         const ASNode& node = graph_.get(asn);
-        const auto& rib = policies_[asn].local_rib();
+        const auto& rib = policy(asn).local_rib();
         if (rib.empty()) continue;
 
         for (const auto& kv : rib)
@@ -180,17 +186,15 @@ public:
               customer,
               Relationship::FROM_PROVIDER
             );
-            policies_[customer].enqueue(out);
+            policy(customer).enqueue(out);
           }
         }
       }
 
       const std::size_t lower_rank = r - 1;
       for (uint32_t asn : layers_[lower_rank])
-      {
-        if (policies_[asn].has_pending())
-          policies_[asn].process_pending();
-      }
+        if (policy(asn).has_pending())
+          policy(asn).process_pending();
     }
   }
 

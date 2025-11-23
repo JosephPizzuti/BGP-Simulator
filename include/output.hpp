@@ -1,5 +1,3 @@
-#pragma once
-#include <string>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -8,34 +6,37 @@
 inline void write_routing_csv(const BGPSim& sim,
                               const std::string& filename)
 {
-  std::ofstream out(filename);
-  if (!out.is_open())
-    throw std::runtime_error("Failed to open output CSV file: " + filename);
-
-  out << "asn,prefix,as_path\n";
-
-  const uint32_t max = sim.max_asn();
-  for (uint32_t asn = 1; asn <= max; ++asn)
-  {
-    const auto& rib = sim.policy(asn).local_rib();
-    if (rib.empty()) continue;
-
-    for (const auto& kv : rib)
-    {
-      const std::string& prefix = kv.first;
-      const Announcement& ann = kv.second;
-
-      std::ostringstream path_ss;
-      for (std::size_t i = 0; i < ann.as_path.size(); ++i)
-      {
-        if (i > 0) path_ss << ' ';
-        path_ss << ann.as_path[i];
-      }
-
-      out << asn << ','
-          << prefix << ','
-          << path_ss.str()
-          << '\n';
+    std::ofstream out(filename);
+    if (!out.is_open()) {
+        throw std::runtime_error("Failed to open output file: " + filename);
     }
-  }
+
+    out << "asn,prefix,as_path\n";
+
+    // assuming ASNs start at 1
+    const uint32_t max = sim.max_asn();
+    for (uint32_t asn = 1; asn <= max; ++asn) {
+        const auto& rib = sim.policy(asn).local_rib();
+
+        for (const auto& [prefix, ann] : rib) {
+            out << asn << ',' << prefix << ',';
+
+            const auto& path = ann.as_path;
+            std::ostringstream path_ss;
+
+            if (path.empty()) {
+                path_ss << "()";
+            } else if (path.size() == 1) {
+                path_ss << '(' << path[0] << ",)";
+            } else {
+                path_ss << '(' << path[0];
+                for (std::size_t i = 1; i < path.size(); ++i) {
+                    path_ss << ", " << path[i];
+                }
+                path_ss << ')';
+            }
+
+            out << '"' << path_ss.str() << '"' << '\n';
+        }
+    }
 }

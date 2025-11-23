@@ -18,16 +18,20 @@ struct Announcement
   std::vector<uint32_t> as_path;
   uint32_t next_hop_asn;
   Relationship received_from;
+  bool rov_invalid = false;
 
   Announcement() = default;
+  
   Announcement(std::string p,
                std::vector<uint32_t> path,
                uint32_t next_hop,
-               Relationship rel)
+               Relationship rel,
+               bool invalid = false)
     : prefix(std::move(p)),
       as_path(std::move(path)),
       next_hop_asn(next_hop),
-      received_from(rel) {}
+      received_from(rel),
+      rov_invalid(invalid) {}
 
 };
 
@@ -35,10 +39,11 @@ inline Announcement make_origin_announcement(const std::string& prefix,
                                              uint32_t asn)
 {
   Announcement a;
-  a.prefix = prefix;
-  a.as_path = {asn};
-  a.next_hop_asn = asn;
+  a.prefix        = prefix;
+  a.as_path       = {asn};
+  a.next_hop_asn  = asn;
   a.received_from = Relationship::ORIGIN;
+  a.rov_invalid   = false;
   return a;
 }
 
