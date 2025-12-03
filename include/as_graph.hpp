@@ -4,6 +4,7 @@
 #include <string>
 #include <stdexcept>
 #include <algorithm>
+#include <queue>
 #include "data_record.hpp"
 #include "read_caida.hpp"
 

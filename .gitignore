@@ -1,6 +1,8 @@
 # Dev
 /data
 /build
+/bench
+/caida
 
 # Prerequisites
 *.d
